@@ -9,7 +9,6 @@ from django.conf import settings
 from django.db import IntegrityError
 from djangae.db import transaction
 
-from google.appengine.ext import db
 from google.appengine.ext import deferred
 
 """
@@ -116,10 +115,10 @@ def _unindex_then_reindex(instance, fields_to_index):
     _do_index(instance, fields_to_index)
 
 
-@db.non_transactional
 def index_instance(instance, fields_to_index, defer_index=True):
     if defer_index:
-        deferred.defer(_unindex_then_reindex, instance, fields_to_index, _queue=QUEUE_FOR_INDEXING)
+        deferred.defer(_unindex_then_reindex, instance, fields_to_index,
+                        _queue=QUEUE_FOR_INDEXING, _transactional=transaction.in_atomic_block())
     else:
         _unindex_then_reindex(instance, fields_to_index)
 
