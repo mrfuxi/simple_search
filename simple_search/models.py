@@ -1,6 +1,7 @@
 import logging
 import shlex
 import time
+import hashlib
 
 from django.db import models
 from django.utils.encoding import smart_str, smart_unicode
@@ -23,95 +24,84 @@ from google.appengine.ext import deferred
 
 QUEUE_FOR_INDEXING = getattr(settings, "QUEUE_FOR_INDEXING", "default")
 
+
+def get_data_from_field(field_, instance_):
+    lookups = field_.split("__")
+    value = instance_
+    for lookup in lookups:
+        if value is None:
+            continue
+        value = getattr(value, lookup)
+
+        if "RelatedManager" in value.__class__.__name__:
+            if lookup == lookups[-2]:
+                return [ getattr(x, lookups[-1]) for x in value.all() ]
+            else:
+                raise TypeError("You can only index one level of related object")
+
+        elif hasattr(value, "__iter__"):
+            if lookup == lookups[-1]:
+                return value
+            else:
+                raise TypeError("You can only index one level of iterable")
+
+    return value
+
+
+def _do_unindex(instance, fields_to_index):
+    for field in fields_to_index:
+        try:
+            text = get_data_from_field(field, instance)
+            terms = parse_terms(text)
+
+            for term in terms:
+                with transaction.atomic(xg=True):
+                    index = Index.objects.get(pk=Index.calc_id(term, instance))
+
+                    counter = GlobalOccuranceCount.objects.get(pk=term)
+                    counter.count -= index.occurances
+                    counter.save()
+
+                    index.delete()
+
+        except (Index.DoesNotExist, GlobalOccuranceCount.DoesNotExist):
+            continue
+
+
 def _do_index(instance, fields_to_index):
-    def get_data_from_field(field_, instance_):
-        lookups = field_.split("__")
-        value = instance
-        for lookup in lookups:
-            if value is None:
-                continue
-            value = getattr(value, lookup)
-
-            if "RelatedManager" in value.__class__.__name__:
-                if lookup == lookups[-2]:
-                    return [ getattr(x, lookups[-1]) for x in value.all() ]
-                else:
-                    raise TypeError("You can only index one level of related object")
-
-            elif hasattr(value, "__iter__"):
-                if lookup == lookups[-1]:
-                    return value
-                else:
-                    raise TypeError("You can only index one level of iterable")
-
-        return [ value ]
-
     try:
         instance = instance.__class__.objects.get(pk=instance.pk)
-    except ObjectDoesNotExist:
-        logging.info("Attempting to retrieve object of class: '%s' - with pk: '%s'", instance.__class__.__name__, instance.pk)
-        raise
-
+    except instance.__class__.DoesNotExist:
+        _do_unindex(instance)
+        return
 
     for field in fields_to_index:
-        texts = get_data_from_field(field, instance)
-        for text in texts:
-            if text is None:
-                continue
+        text = get_data_from_field(field, instance)
+        terms = parse_terms(text)
 
-            text = smart_unicode(text)
-            text = text.lower() #Normalize
+        for term in terms:
+            with transaction.atomic(xg=True):
+                term_count = text.count(term)
 
-            words = text.split(" ") #Split on whitespace
+                Index.objects.update_or_create(
+                    pk=Index.calc_id(term, instance),
+                    defaults={
+                        "occurances": term_count,
+                        "iexact": term,
+                        "instance_db_table": instance._meta.db_table,
+                        "instance_pk": instance.pk,
+                    }
+                )
 
-            #Build up combinations of adjacent words
-            for i in xrange(0, len(words)):
-                for j in xrange(1, 5):
-                    term_words = words[i:i+j]
+                counter, created = GlobalOccuranceCount.objects.get_or_create(
+                    pk=term
+                )
+                counter.count += term_count
+                counter.save()
 
-                    if len(term_words) != j:
-                        break
-
-                    term = u" ".join(term_words)
-
-                    if not term.strip(): continue
-
-                    while True:
-                        try:
-                            filter_args = dict(
-                                iexact=term,
-                                instance_db_table=instance._meta.db_table,
-                                instance_pk=instance.pk
-                            )
-
-                            if Index.objects.filter(**filter_args).exists():
-                                # Don't reindex if the index already exists
-                                break
-
-                            with transaction.atomic(xg=True):
-                                logging.info("Indexing: '%s', %s", term, type(term))
-                                term_count = text.count(term)
-
-                                try:
-                                    filter_args["occurances"] = term_count
-                                    Index.objects.create(
-                                        **filter_args
-                                    )
-
-                                    counter, created = GlobalOccuranceCount.objects.get_or_create(pk=term)
-                                    counter.count += term_count
-                                    counter.save()
-                                except IntegrityError:
-                                    # If we already created this index for this instance, then ignore
-                                    pass
-                                break
-                        except transaction.TransactionFailedError:
-                            logging.warning("Transaction collision, retrying!")
-                            time.sleep(1)
-                            continue
 
 def _unindex_then_reindex(instance, fields_to_index):
-    unindex_instance(instance)
+    _do_unindex(instance, fields_to_index)
     _do_index(instance, fields_to_index)
 
 
@@ -123,35 +113,8 @@ def index_instance(instance, fields_to_index, defer_index=True):
         _unindex_then_reindex(instance, fields_to_index)
 
 
-def unindex_instance(instance):
-    indexes = Index.objects.filter(instance_db_table=instance._meta.db_table, instance_pk=instance.pk).all()
-    for index in indexes:
-        try:
-            while True:
-                try:
-                    with transaction.atomic(xg=True):
-                        try:
-                            index = Index.objects.get(pk=index.pk)
-                        except Index.DoesNotExist:
-                            return
-
-                        count = GlobalOccuranceCount.objects.get(pk=index.iexact)
-                        count.count -= index.occurances
-                        count.save()
-                        index.delete()
-
-                        if count.count < 0:
-                            logging.error("The GOC of %s was negative (%s) while unindexing %s", count.pk, count.count, index.pk)
-                        break
-
-                except transaction.TransactionFailedError:
-                    logging.warning("Transaction collision, retrying!")
-                    time.sleep(1)
-                    continue
-        except GlobalOccuranceCount.DoesNotExist:
-            logging.warning("A GlobalOccuranceCount for Index: %s does not exist, ignoring", index.pk)
-            continue
-
+def unindex_instance(instance, fields_to_index):
+    _do_unindex(instance, fields_to_index)
 
 
 def parse_terms(search_string):
@@ -160,6 +123,7 @@ def parse_terms(search_string):
     # The split requires the unicode string to be encoded to a bytestring, but
     # we need the terms to be decoded back to utf-8 for use in the datastore queries.
     return [smart_unicode(term) for term in terms]
+
 
 def search(model_class, search_string, per_page=50, current_page=1, total_pages=10, **filters):
     terms = parse_terms(search_string)
@@ -216,6 +180,7 @@ def search(model_class, search_string, per_page=50, current_page=1, total_pages=
 
     return [x for x in sorted_results if x ]
 
+
 class GlobalOccuranceCount(models.Model):
     id = models.CharField(max_length=1024, primary_key=True)
     count = models.PositiveIntegerField(default=0)
@@ -236,7 +201,14 @@ class GlobalOccuranceCount(models.Model):
                 time.sleep(1)
                 continue
 
+
 class Index(models.Model):
+    @classmethod
+    def calc_id(cls, term, instance):
+        source = "|".join([term, instance.__class__._meta.db_table, unicode(instance.pk)])
+        return hashlib.md5(source).hexdigest()
+
+    id = models.CharField(max_length=500, primary_key=True)
     iexact = models.CharField(max_length=1024)
     instance_db_table = models.CharField(max_length=1024)
     instance_pk = models.PositiveIntegerField(default=0)
