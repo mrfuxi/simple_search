@@ -86,15 +86,27 @@ def _do_index(instance, fields_to_index):
     def callback(instance, text, term):
         with transaction.atomic(xg=True):
             term_count = text.lower().count(term)
-            InstanceIndex.objects.update_or_create(
-                pk=InstanceIndex.calc_id(term, instance),
-                defaults={
-                    "count": term_count,
-                    "iexact": term,
-                    "instance_db_table": instance._meta.db_table,
-                    "instance_pk": instance.pk,
-                }
-            )
+            index_pk = InstanceIndex.calc_id(term, instance)
+            try:
+                index = InstanceIndex.objects.get(pk=index_pk)
+
+                if index.count == term_count:
+                    return
+                else:
+                    # OK, something weird happened, we need to just
+                    # need to figure out what difference we need to add to
+                    # the global count!
+                    term_count = term_count - index.count
+            except InstanceIndex.DoesNotExist:
+                index = InstanceIndex.objects.create(
+                    pk=index_pk,
+                    **{
+                        "count": term_count,
+                        "iexact": term,
+                        "instance_db_table": instance._meta.db_table,
+                        "instance_pk": instance.pk,
+                    }
+                )
 
             counter, created = TermCount.objects.get_or_create(
                 pk=term
