@@ -56,15 +56,15 @@ def _do_unindex(instance, fields_to_index):
 
             for term in terms:
                 with transaction.atomic(xg=True):
-                    index = Index.objects.get(pk=Index.calc_id(term, instance))
+                    index = InstanceIndex.objects.get(pk=InstanceIndex.calc_id(term, instance))
 
-                    counter = GlobalOccuranceCount.objects.get(pk=term)
-                    counter.count -= index.occurances
+                    counter = TermCount.objects.get(pk=term)
+                    counter.count -= index.count
                     counter.save()
 
                     index.delete()
 
-        except (Index.DoesNotExist, GlobalOccuranceCount.DoesNotExist):
+        except (InstanceIndex.DoesNotExist, TermCount.DoesNotExist):
             continue
 
 
@@ -81,19 +81,18 @@ def _do_index(instance, fields_to_index):
 
         for term in terms:
             with transaction.atomic(xg=True):
-                term_count = text.count(term)
-
-                Index.objects.update_or_create(
-                    pk=Index.calc_id(term, instance),
+                term_count = text.lower().count(term)
+                InstanceIndex.objects.update_or_create(
+                    pk=InstanceIndex.calc_id(term, instance),
                     defaults={
-                        "occurances": term_count,
+                        "count": term_count,
                         "iexact": term,
                         "instance_db_table": instance._meta.db_table,
                         "instance_pk": instance.pk,
                     }
                 )
 
-                counter, created = GlobalOccuranceCount.objects.get_or_create(
+                counter, created = TermCount.objects.get_or_create(
                     pk=term
                 )
                 counter.count += term_count
@@ -129,8 +128,8 @@ def search(model_class, search_string, per_page=50, current_page=1, total_pages=
     terms = parse_terms(search_string)
 
     #Get all matching terms
-    matching_terms = dict(GlobalOccuranceCount.objects.filter(pk__in=terms).values_list('pk', 'count'))
-    matches = Index.objects.filter(iexact__in=terms, instance_db_table=model_class._meta.db_table).all()
+    matching_terms = dict(TermCount.objects.filter(pk__in=terms).values_list('pk', 'count'))
+    matches = InstanceIndex.objects.filter(iexact__in=terms, instance_db_table=model_class._meta.db_table).all()
 
     instance_weights = {}
 
@@ -181,7 +180,7 @@ def search(model_class, search_string, per_page=50, current_page=1, total_pages=
     return [x for x in sorted_results if x ]
 
 
-class GlobalOccuranceCount(models.Model):
+class TermCount(models.Model):
     id = models.CharField(max_length=1024, primary_key=True)
     count = models.PositiveIntegerField(default=0)
 
@@ -189,11 +188,11 @@ class GlobalOccuranceCount(models.Model):
         while True:
             try:
                 count = 0
-                for index in Index.objects.filter(iexact=self.id):
-                    count += Index.objects.get(pk=index.pk).occurances
+                for index in InstanceIndex.objects.filter(iexact=self.id):
+                    count += InstanceIndex.objects.get(pk=index.pk).count
 
                 with transaction.atomic():
-                    goc = GlobalOccuranceCount.objects.get(pk=self.id)
+                    goc = TermCount.objects.get(pk=self.id)
                     goc.count = count
                     goc.save()
 
@@ -202,17 +201,17 @@ class GlobalOccuranceCount(models.Model):
                 continue
 
 
-class Index(models.Model):
+class InstanceIndex(models.Model):
     @classmethod
     def calc_id(cls, term, instance):
-        source = "|".join([term, instance.__class__._meta.db_table, unicode(instance.pk)])
-        return hashlib.md5(source).hexdigest()
+        source = u"|".join([term, instance.__class__._meta.db_table, unicode(instance.pk)])
+        return hashlib.md5(source.encode("utf-8")).hexdigest()
 
     id = models.CharField(max_length=500, primary_key=True)
     iexact = models.CharField(max_length=1024)
     instance_db_table = models.CharField(max_length=1024)
     instance_pk = models.PositiveIntegerField(default=0)
-    occurances = models.PositiveIntegerField(default=0)
+    count = models.PositiveIntegerField(default=0)
 
     class Meta:
         unique_together = [

@@ -12,8 +12,8 @@ from django.db import models
 from djangae.test import TestCase
 
 from .models import (
-    GlobalOccuranceCount,
-    Index,
+    TermCount,
+    InstanceIndex,
     index_instance,
     unindex_instance,
     search
@@ -29,26 +29,19 @@ class SampleModel(models.Model):
 class SearchTests(TestCase):
     def test_field_indexing(self):
         instance1 = SampleModel.objects.create(
-            field1="bananas apples cherries plums oranges kiwi"
+            field1="bananas apples cherries plums oranges kiwi bananas"
         )
 
         index_instance(instance1, ["field1"], defer_index=False)
 
-        self.assertEqual(1, Index.objects.filter(iexact="bananas").count())
-        self.assertEqual(1, Index.objects.filter(iexact="bananas apples").count())
-        self.assertEqual(1, Index.objects.filter(iexact="bananas apples cherries").count())
-        self.assertEqual(1, Index.objects.filter(iexact="bananas apples cherries plums").count())
+        self.assertEqual(1, InstanceIndex.objects.filter(iexact="bananas").count())
+        self.assertEqual(2, InstanceIndex.objects.get(iexact="bananas").count)
+        self.assertEqual(1, InstanceIndex.objects.filter(iexact="apples").count())
+        self.assertEqual(1, InstanceIndex.objects.filter(iexact="cherries").count())
+        self.assertEqual(1, InstanceIndex.objects.filter(iexact="plums").count())
+        self.assertEqual(1, InstanceIndex.objects.filter(iexact="oranges").count())
+        self.assertEqual(1, InstanceIndex.objects.filter(iexact="kiwi").count())
 
-        #We only store up to 4 adjacent words
-        self.assertEqual(0, Index.objects.filter(iexact="bananas apples cherries plums oranges").count())
-
-        self.assertEqual(1, Index.objects.filter(iexact="apples").count())
-        self.assertEqual(1, Index.objects.filter(iexact="apples cherries").count())
-        self.assertEqual(1, Index.objects.filter(iexact="apples cherries plums").count())
-        self.assertEqual(1, Index.objects.filter(iexact="apples cherries plums oranges").count())
-
-        #We only store up to 4 adjacent words
-        self.assertEqual(0, Index.objects.filter(iexact="apples cherries plums oranges kiwis").count())
 
     def test_ordering(self):
         instance1 = SampleModel.objects.create(field1="eat a fish")
@@ -71,34 +64,34 @@ class SearchTests(TestCase):
 
     def test_basic_searching(self):
         self.assertEqual(0, SampleModel.objects.count())
-        self.assertEqual(0, GlobalOccuranceCount.objects.count())
+        self.assertEqual(0, TermCount.objects.count())
 
         instance1 = SampleModel.objects.create(field1="Banana", field2="Apple")
         instance2 = SampleModel.objects.create(field1="banana", field2="Cherry")
         instance3 = SampleModel.objects.create(field1="BANANA")
 
         index_instance(instance1, ["field1", "field2"], defer_index=False)
-        self.assertEqual(2, Index.objects.count())
-        self.assertEqual(1, GlobalOccuranceCount.objects.get(pk="banana").count)
-        self.assertEqual(1, GlobalOccuranceCount.objects.get(pk="apple").count)
+        self.assertEqual(2, InstanceIndex.objects.count())
+        self.assertEqual(1, TermCount.objects.get(pk="banana").count)
+        self.assertEqual(1, TermCount.objects.get(pk="apple").count)
 
         index_instance(instance2, ["field1", "field2"], defer_index=False)
 
-        self.assertEqual(4, Index.objects.count())
-        self.assertEqual(2, GlobalOccuranceCount.objects.get(pk="banana").count)
-        self.assertEqual(1, GlobalOccuranceCount.objects.get(pk="apple").count)
-        self.assertEqual(1, GlobalOccuranceCount.objects.get(pk="cherry").count)
+        self.assertEqual(4, InstanceIndex.objects.count())
+        self.assertEqual(2, TermCount.objects.get(pk="banana").count)
+        self.assertEqual(1, TermCount.objects.get(pk="apple").count)
+        self.assertEqual(1, TermCount.objects.get(pk="cherry").count)
 
         index_instance(instance3, ["field1"], defer_index=False)
-        self.assertEqual(5, Index.objects.count())
-        self.assertEqual(3, GlobalOccuranceCount.objects.get(pk="banana").count)
-        self.assertEqual(1, GlobalOccuranceCount.objects.get(pk="apple").count)
-        self.assertEqual(1, GlobalOccuranceCount.objects.get(pk="cherry").count)
+        self.assertEqual(5, InstanceIndex.objects.count())
+        self.assertEqual(3, TermCount.objects.get(pk="banana").count)
+        self.assertEqual(1, TermCount.objects.get(pk="apple").count)
+        self.assertEqual(1, TermCount.objects.get(pk="cherry").count)
 
         self.assertItemsEqual([instance1, instance2, instance3], search(SampleModel, "banana"))
         self.assertItemsEqual([instance2], search(SampleModel, "cherry"))
 
-        unindex_instance(instance1)
+        unindex_instance(instance1, ["field1", "field2"])
 
         self.assertItemsEqual([instance2, instance3], search(SampleModel, "banana"))
         self.assertItemsEqual([instance2], search(SampleModel, "cherry"))
@@ -139,13 +132,13 @@ class SearchTests(TestCase):
         instance1 = SampleModel.objects.create(field1="Banana", field2="Apple")
         index_instance(instance1, ["field1", "field2"], defer_index=False)
 
-        goc = GlobalOccuranceCount.objects.get(pk="banana")
+        goc = TermCount.objects.get(pk="banana")
         self.assertEqual(1, goc.count)
 
         for i in xrange(5):
-            unindex_instance(instance1)
+            unindex_instance(instance1, ["field1", "field2"])
 
-        goc = GlobalOccuranceCount.objects.get(pk="banana")
+        goc = TermCount.objects.get(pk="banana")
         self.assertEqual(0, goc.count)
 
     def test_multiple_indexing_only_does_one(self):
@@ -154,9 +147,9 @@ class SearchTests(TestCase):
         index_instance(instance1, ["field1", "field2"], defer_index=False)
         index_instance(instance1, ["field1", "field2"], defer_index=False)
 
-        goc = GlobalOccuranceCount.objects.get(pk="banana")
+        goc = TermCount.objects.get(pk="banana")
         self.assertEqual(1, goc.count)
-        self.assertEqual(2, Index.objects.count())
+        self.assertEqual(2, InstanceIndex.objects.count())
 
     def test_non_ascii_characters_in_search_string(self):
         """
@@ -175,6 +168,5 @@ class SearchTests(TestCase):
         instance1 = SampleModel.objects.create(field1="ąpple ćhęrry")
         index_instance(instance1, ["field1"], defer_index=False)
 
-        self.assertEqual(1, Index.objects.filter(iexact="ąpple").count())
-        self.assertEqual(1, Index.objects.filter(iexact="ąpple ćhęrry").count())
-
+        self.assertEqual(1, InstanceIndex.objects.filter(iexact="ąpple").count())
+        self.assertEqual(1, InstanceIndex.objects.filter(iexact="ćhęrry").count())
