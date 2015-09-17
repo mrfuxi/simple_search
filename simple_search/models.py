@@ -2,6 +2,7 @@ import shlex
 import time
 import hashlib
 import math
+import collections
 
 from django.db import models
 from django.utils.encoding import smart_str, smart_unicode
@@ -93,8 +94,8 @@ def _do_index(instance, fields_to_index):
                 if index.count == term_count:
                     return
                 else:
-                    # OK, something weird happened, we need to just
-                    # need to figure out what difference we need to add to
+                    # OK, something weird happened and we indexed twice
+                    # we need to just need to figure out what difference we need to add to
                     # the global count!
                     term_count = term_count - index.count
             except InstanceIndex.DoesNotExist:
@@ -142,17 +143,26 @@ def parse_terms(search_string):
     return [smart_unicode(term) for term in terms]
 
 
+Match = collections.namedtuple("Match", ("count", "term", "partial"))
+
 def search(model_class, search_string, per_page=50, current_page=1, total_pages=10, **filters):
     terms = parse_terms(search_string)
 
     #Get all matching terms
-    matching_terms = dict(TermCount.objects.filter(pk__in=terms).values_list('pk', 'count'))
-    matches = InstanceIndex.objects.filter(iexact__in=terms, instance_db_table=model_class._meta.db_table).all()
+    matches = InstanceIndex.objects.filter(
+        partials__in=terms,
+        instance_db_table=model_class._meta.db_table
+    ).values("partials", "iexact", "instance_pk")
+
+    matching_terms = dict(TermCount.objects.filter(pk__in=[ x["iexact"] for x in matches ]).values_list('pk', 'count'))
 
     instance_weights = {}
 
     for match in matches:
-        instance_weights.setdefault(match.instance_pk, []).append(matching_terms[match.iexact])
+        # This might not be the best matching partial, for that we'd have to work out the
+        # difference... not sure if this is worthy of a fixme though...
+        matching_partial = (x for x in match["partials"] if x in terms).next()
+        instance_weights.setdefault(match["instance_pk"], []).append(Match(matching_terms[match["iexact"]], match["iexact"], matching_partial))
 
     final_weights = []
     for k, v in instance_weights.items():
@@ -166,10 +176,36 @@ def search(model_class, search_string, per_page=50, current_page=1, total_pages=
             1 = 1 + (0 * 0.5) = 1    -> scores / 1
             2 = 2 + (1 * 0.5) = 2.5  -> scores / 2.5 (rather than 2)
             3 = 3 + (2 * 0.5) = 4    -> scores / 4 (rather than 3)
+
+            We penalize partial matches by the percentage difference based on the length
+            of the term
         """
 
         n = float(len(v))
-        final_weights.append((sum(v) / (n + ((n-1) * 0.5)), k))
+
+        final_counts = []
+        for match in v:
+            count = match.count
+            partial = match.partial
+            term = match.term
+
+            term_length = len(term)
+            partial_length = len(partial)
+
+            # Here we penalize counts if they are partial matches depending on
+            # how loosely they match the term. Remember lower is better, so we
+            # bump the score
+            min_length = min(term_length, partial_length)
+            max_length = max(term_length, partial_length)
+            difference = abs(term_length - partial_length)
+            difference += sum([1 for i in xrange(min_length) if match.term[i] != match.partial[i]])
+            penalization = 1.0 + ((1.0 / float(max_length)) * float(difference))
+
+            final_counts.append(count * penalization)
+
+        score = sum(final_counts) / (n + ((n-1) * 0.5))
+
+        final_weights.append((score, k))
 
     final_weights.sort()
 

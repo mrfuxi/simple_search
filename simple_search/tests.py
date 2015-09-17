@@ -67,6 +67,30 @@ class SearchTests(TestCase):
         self.assertTrue("baanas" in index.partials)
         self.assertTrue("bannas" in index.partials)
 
+    def test_partial_matching(self):
+        instance1 = SampleModel.objects.create(field1="bananas")
+        instance2 = SampleModel.objects.create(field1="bana")
+
+        index_instance(instance1, ["field1"], defer_index=False)
+        index_instance(instance2, ["field1"], defer_index=False)
+
+        results = search(SampleModel, "bana")
+
+        self.assertEqual(instance2, results[0])
+        self.assertEqual(instance1, results[1])
+
+    def test_partial_ranking(self):
+        instance2 = SampleModel.objects.create(field1="some other thing 2")
+        instance1 = SampleModel.objects.create(field1="extra thing 2")
+
+        index_instance(instance1, ["field1"], defer_index=False)
+        index_instance(instance2, ["field1"], defer_index=False)
+
+        results = search(SampleModel, "extr 2")
+
+        self.assertEqual(instance1, results[0])
+        self.assertEqual(instance2, results[1])
+
     def test_ordering(self):
         instance1 = SampleModel.objects.create(field1="eat a fish")
         instance2 = SampleModel.objects.create(field1="eat a chicken")
