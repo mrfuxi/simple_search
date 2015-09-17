@@ -48,24 +48,34 @@ def get_data_from_field(field_, instance_):
     return value
 
 
-def _do_unindex(instance, fields_to_index):
+def _process_texts(instance, fields_to_index, func):
     for field in fields_to_index:
-        try:
-            text = get_data_from_field(field, instance)
+        texts = get_data_from_field(field, instance)
+        if not isinstance(texts, (list, set, tuple)):
+            texts = [ texts ]
+
+        for text in texts:
             terms = parse_terms(text)
 
             for term in terms:
-                with transaction.atomic(xg=True):
-                    index = InstanceIndex.objects.get(pk=InstanceIndex.calc_id(term, instance))
+                func(instance, text, term)
 
-                    counter = TermCount.objects.get(pk=term)
-                    counter.count -= index.count
-                    counter.save()
 
-                    index.delete()
+def _do_unindex(instance, fields_to_index):
+    def callback(instance, text, term):
+        try:
+            with transaction.atomic(xg=True):
+                index = InstanceIndex.objects.get(pk=InstanceIndex.calc_id(term, instance))
 
+                counter = TermCount.objects.get(pk=term)
+                counter.count -= index.count
+                counter.save()
+
+                index.delete()
         except (InstanceIndex.DoesNotExist, TermCount.DoesNotExist):
-            continue
+            pass
+
+    _process_texts(instance, fields_to_index, callback)
 
 
 def _do_index(instance, fields_to_index):
@@ -75,28 +85,26 @@ def _do_index(instance, fields_to_index):
         _do_unindex(instance)
         return
 
-    for field in fields_to_index:
-        text = get_data_from_field(field, instance)
-        terms = parse_terms(text)
+    def callback(instance, text, term):
+        with transaction.atomic(xg=True):
+            term_count = text.lower().count(term)
+            InstanceIndex.objects.update_or_create(
+                pk=InstanceIndex.calc_id(term, instance),
+                defaults={
+                    "count": term_count,
+                    "iexact": term,
+                    "instance_db_table": instance._meta.db_table,
+                    "instance_pk": instance.pk,
+                }
+            )
 
-        for term in terms:
-            with transaction.atomic(xg=True):
-                term_count = text.lower().count(term)
-                InstanceIndex.objects.update_or_create(
-                    pk=InstanceIndex.calc_id(term, instance),
-                    defaults={
-                        "count": term_count,
-                        "iexact": term,
-                        "instance_db_table": instance._meta.db_table,
-                        "instance_pk": instance.pk,
-                    }
-                )
+            counter, created = TermCount.objects.get_or_create(
+                pk=term
+            )
+            counter.count += term_count
+            counter.save()
 
-                counter, created = TermCount.objects.get_or_create(
-                    pk=term
-                )
-                counter.count += term_count
-                counter.save()
+    _process_texts(instance, fields_to_index, callback)
 
 
 def _unindex_then_reindex(instance, fields_to_index):
