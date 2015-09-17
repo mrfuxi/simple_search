@@ -1,15 +1,13 @@
-import logging
 import shlex
 import time
 import hashlib
+import math
 
 from django.db import models
 from django.utils.encoding import smart_str, smart_unicode
-from django.core.exceptions import ObjectDoesNotExist
 from django.conf import settings
-from django.db import IntegrityError
 from djangae.db import transaction
-
+from djangae.fields import SetField
 from google.appengine.ext import deferred
 
 """
@@ -221,10 +219,45 @@ class InstanceIndex(models.Model):
     instance_pk = models.PositiveIntegerField(default=0)
     count = models.PositiveIntegerField(default=0)
 
+    partials = SetField(models.CharField(max_length=500))
+
     class Meta:
         unique_together = [
             ('iexact', 'instance_db_table', 'instance_pk')
         ]
+
+    def _generate_partials(self):
+        """
+            Partials are anything we want to match when doing fuzzy matching
+            change this logic if you can think of more possibilities!
+        """
+
+        partials = set([self.iexact]) #We always include the term itself for easier querying
+        length = len(self.iexact)
+        for i in xrange(int(math.floor(float(length) / 2.0)), length):
+            s = self.iexact[:i]
+            # We want to match the first half of the word always
+            # but be fuzzy with the last half
+            partials.add(s)
+
+        # Now, just add the term with characters missing
+        for j in xrange(1, len(self.iexact)):
+            partials.add(self.iexact[:j] + self.iexact[j+1:])
+
+        # And swap out vowels
+        vowels = "aeiou"
+        for i, vowel in enumerate(vowels):
+            others = vowels[:i] + vowels[i+1:]
+            for other in others:
+                s = self.iexact
+                while vowel in s:
+                    s = s.replace(vowel, other, 1)
+                    partials.add(s)
+        return partials
+
+    def save(self, *args, **kwargs):
+        self.partials = self._generate_partials()
+        return super(InstanceIndex, self).save(*args, **kwargs)
 
 from django.dispatch import receiver
 from django.db.models.signals import post_save, pre_delete

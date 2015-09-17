@@ -42,6 +42,30 @@ class SearchTests(TestCase):
         self.assertEqual(1, InstanceIndex.objects.filter(iexact="oranges").count())
         self.assertEqual(1, InstanceIndex.objects.filter(iexact="kiwi").count())
 
+    def test_partial_generation(self):
+        instance1 = SampleModel.objects.create(field1="bananas")
+        index_instance(instance1, ["field1"], defer_index=False)
+
+        index = InstanceIndex.objects.get(iexact="bananas")
+
+        # Check vowels are replaced
+        self.assertTrue("bonanas" in index.partials)
+        self.assertTrue("bononas" in index.partials)
+        self.assertTrue("bononos" in index.partials)
+
+        # Check the original term is there
+        self.assertTrue("bananas" in index.partials)
+
+        # Check starts with things
+        self.assertTrue("bana" in index.partials)
+        self.assertTrue("banan" in index.partials)
+        self.assertTrue("banana" in index.partials)
+        self.assertTrue("bananas" in index.partials)
+
+        # Check missing letters
+        self.assertTrue("bnanas" in index.partials)
+        self.assertTrue("baanas" in index.partials)
+        self.assertTrue("bannas" in index.partials)
 
     def test_ordering(self):
         instance1 = SampleModel.objects.create(field1="eat a fish")
