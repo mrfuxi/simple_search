@@ -320,4 +320,6 @@ def post_save_index(sender, instance, created, raw, *args, **kwargs):
 @receiver(pre_delete)
 def pre_delete_unindex(sender, instance, using, *args, **kwarg):
     if getattr(instance, "Search", None):
-        unindex_instance(instance)
+        fields_to_index = getattr(instance.Search, "fields", [])
+        if fields_to_index:
+            unindex_instance(instance, fields_to_index)
