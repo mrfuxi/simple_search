@@ -136,7 +136,7 @@ def unindex_instance(instance, fields_to_index):
 
 
 def parse_terms(search_string):
-    terms = shlex.split(smart_str(search_string.lower()))
+    terms = smart_str(search_string.lower()).split()
 
     # The split requires the unicode string to be encoded to a bytestring, but
     # we need the terms to be decoded back to utf-8 for use in the datastore queries.
