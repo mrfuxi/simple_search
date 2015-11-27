@@ -1,4 +1,3 @@
-import shlex
 import time
 import hashlib
 import math
@@ -7,9 +6,11 @@ import collections
 from django.db import models
 from django.utils.encoding import smart_str, smart_unicode
 from django.conf import settings
+from django.core.cache import cache
 from djangae.db import transaction
 from djangae.fields import SetField
 from google.appengine.ext import deferred
+from google.appengine.api.taskqueue import TaskRetryOptions
 
 """
     REMAINING TO DO!
@@ -119,14 +120,29 @@ def _do_index(instance, fields_to_index):
 
 
 def _unindex_then_reindex(instance, fields_to_index):
-    _do_unindex(instance, fields_to_index)
-    _do_index(instance, fields_to_index)
+    lock_key = "reindex_%s_%s" % (instance.__class__.__name__, instance.pk)
+    if cache.get(lock_key):
+        index_instance(instance, fields_to_index, defer_index=True, delay=10)
+        return
+
+    cache.set(lock_key, True, 30)
+
+    try:
+        _do_unindex(instance, fields_to_index)
+        _do_index(instance, fields_to_index)
+    finally:
+        cache.delete(lock_key)
 
 
-def index_instance(instance, fields_to_index, defer_index=True):
+def index_instance(instance, fields_to_index, defer_index=True, delay=2):
     if defer_index:
-        deferred.defer(_unindex_then_reindex, instance, fields_to_index,
-                        _queue=QUEUE_FOR_INDEXING, _transactional=transaction.in_atomic_block())
+        deferred.defer(
+            _unindex_then_reindex, instance, fields_to_index,
+            _queue=QUEUE_FOR_INDEXING,
+            _transactional=transaction.in_atomic_block(),
+            _countdown=delay,
+            _retry_options=TaskRetryOptions(min_backoff_seconds=2, max_backoff_seconds=32),
+        )
     else:
         _unindex_then_reindex(instance, fields_to_index)
 
